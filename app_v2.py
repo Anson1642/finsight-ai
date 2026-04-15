@@ -7,89 +7,53 @@ import re
 from google import genai
 
 # ==========================================
-# 1. CONFIGURATION & SECURITY
+# 1. CONFIG & SECURITY
 # ==========================================
 MY_API_KEY = "AIzaSyBOWAqxkAKxBBNkUy2-Fck_PkTqZlL6gIQ"
 DB_NAME = "finance.db"
 
-def make_hashes(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
+def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
 
 # ==========================================
-# 2. DATABASE FUNCTIONS (Robust Migration)
+# 2. DATABASE & DATA TOOLS
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # 建立 users 表
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    # 建立 transactions 表
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)''')
-    
-    # 檢查並自動補上 username 欄位 (防止舊版資料庫報錯)
-    c.execute("PRAGMA table_info(transactions)")
-    columns = [info[1] for info in c.fetchall()]
-    if 'username' not in columns:
-        c.execute("ALTER TABLE transactions ADD COLUMN username TEXT")
-    
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)''')
     conn.commit()
     conn.close()
 
-def add_user(username, password):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, make_hashes(password)))
-        conn.commit()
-        return True
-    except: return False
-    finally: conn.close()
-
-def login_user(username, password):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT password FROM users WHERE username = ?", (username,))
-    data = c.fetchone()
-    conn.close()
-    if data and make_hashes(password) == data[0]: return True
-    return False
+def normalize_category(cat):
+    cats = ["Food", "Transport", "Housing", "Entertainment", "Others"]
+    return cat if cat in cats else "Others"
 
 def insert_transaction(amount, category, description, username):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", 
-              (amount, category, description, username))
+    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", (amount, category, description, username))
     conn.commit()
     conn.close()
 
 def get_user_transactions(username):
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT amount, category, description FROM transactions WHERE username = ?", conn, params=(username,))
+    df = pd.read_sql_query("SELECT * FROM transactions WHERE username = ?", conn, params=(username,))
     conn.close()
     return df
-
-def clear_user_data(username):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM transactions WHERE username = ?", (username,))
-    conn.commit()
-    conn.close()
 
 # ==========================================
 # 3. AI LOGIC ENGINE
 # ==========================================
 def process_user_input(user_text, df):
     client = genai.Client(api_key=MY_API_KEY)
-    history_text = df.to_string(index=False) if not df.empty else "No transactions."
-    
-    prompt = f"""You are a professional AI Finance Assistant.
-    History: {history_text}. User Input: "{user_text}".
-    Return STRICTLY valid JSON.
-    If log: {{"intent": "log", "amount": <num>, "category": "<word>", "description": "<text>"}}
-    If chat: {{"intent": "chat", "chat_reply": "<answer>"}}
-    No markdown blocks."""
-    
+    history = df.to_string(index=False) if not df.empty else "No history."
+    prompt = f"""You are 'FinSight', a professional AI Finance Assistant.
+    History: {history}. User Input: "{user_text}".
+    Standard Categories: Food, Transport, Housing, Entertainment, Others.
+    Task: Extract data or answer a question. Return STRICTLY valid JSON.
+    If log: {{"intent": "log", "amount": <num>, "category": "<std_cat>", "description": "<text>"}}
+    If chat: {{"intent": "chat", "chat_reply": "<answer>"}}"""
     try:
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
@@ -97,56 +61,62 @@ def process_user_input(user_text, df):
     except: return None
 
 # ==========================================
-# 4. STREAMLIT UI
+# 4. MAIN UI (STREAMLIT)
 # ==========================================
 def main():
-    st.set_page_config(page_title="FinSight AI", page_icon="💰", layout="wide")
+    st.set_page_config(page_title="FinSight Pro", layout="wide")
     init_db()
 
-    if "logged_in" not in st.session_state:
-        st.session_state.update({"logged_in": False, "username": None})
+    if "logged_in" not in st.session_state: st.session_state.update({"logged_in": False, "username": None})
 
+    # --- LOGIN PAGE ---
     if not st.session_state.logged_in:
-        st.title("💰 FinSight AI - Login")
-        choice = st.selectbox("Action", ["Login", "Signup"])
+        st.title("💰 FinSight Pro - Login")
         user = st.text_input("Username")
         pwd = st.text_input("Password", type='password')
-        if st.button("Enter"):
-            if choice == "Signup" and add_user(user, pwd): st.success("Created!")
-            elif choice == "Login" and login_user(user, pwd):
-                st.session_state.update({"logged_in": True, "username": user})
-                st.rerun()
-            else: st.error("Login failed / User exists")
+        col1, col2 = st.columns(2)
+        if col1.button("Login"):
+            # (省略登入邏輯，直接進入展示)
+            st.session_state.update({"logged_in": True, "username": user})
+            st.rerun()
+    
+    # --- APP PAGE ---
     else:
         username = st.session_state.username
-        st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in": False, "messages": []}))
+        st.sidebar.title(f"Hi, {username}!")
+        if st.sidebar.button("Logout"): st.session_state.update({"logged_in": False}); st.rerun()
         
+        budget = st.sidebar.number_input("Monthly Budget ($)", value=1000)
         df = get_user_transactions(username)
         
-        with st.sidebar:
-            st.title(f"Hi, {username}!")
-            if not df.empty:
-                st.bar_chart(df.groupby('category')['amount'].sum())
-            if st.button("🗑️ Clear My Data"):
-                clear_user_data(username); st.rerun()
-
-        st.title("💰 FinSight AI Assistant")
-        if "messages" not in st.session_state: st.session_state.messages = []
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]): st.markdown(msg["content"])
-
-        if user_text := st.chat_input("Log expense or ask question..."):
-            st.chat_message("user").markdown(user_text)
-            st.session_state.messages.append({"role": "user", "content": user_text})
+        tab1, tab2 = st.tabs(["💬 Chat & Log", "📊 Dashboard"])
+        
+        with tab1:
+            st.subheader("Financial Assistant")
+            if "messages" not in st.session_state: st.session_state.messages = []
+            for msg in st.session_state.messages: st.chat_message(msg["role"]).markdown(msg["content"])
             
-            result = process_user_input(user_text, df)
-            if result and result.get("intent") == "log":
-                insert_transaction(result["amount"], result["category"], result["description"], username)
-                st.rerun()
-            elif result and result.get("intent") == "chat":
-                reply = result.get("chat_reply")
-                st.chat_message("assistant").markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
+            if prompt := st.chat_input("Log expense or ask question..."):
+                st.chat_message("user").markdown(prompt)
+                res = process_user_input(prompt, df)
+                if res and res.get("intent") == "log":
+                    amt = res['amount']
+                    cat = normalize_category(res.get('category', 'Others'))
+                    if df['amount'].sum() + amt > budget: st.warning("⚠️ Warning: Budget limit exceeded!")
+                    insert_transaction(amt, cat, res['description'], username)
+                    st.rerun()
+                elif res and res.get("chat_reply"):
+                    st.chat_message("assistant").markdown(res['chat_reply'])
+
+        with tab2:
+            st.title("Financial Overview")
+            if not df.empty:
+                col1, col2 = st.columns(2)
+                with col1: st.bar_chart(df.groupby('category')['amount'].sum())
+                with col2: st.dataframe(df)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download CSV", csv, "data.csv", "text/csv")
+            else: st.info("No data.")
 
 if __name__ == "__main__":
     main()
