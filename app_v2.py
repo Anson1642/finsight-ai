@@ -5,36 +5,29 @@ import pandas as pd
 import hashlib
 import re
 from google import genai
+from datetime import datetime
 
 # ==========================================
-# 1. CONFIG & SECURITY
+# 1. CONFIG & DB
 # ==========================================
 MY_API_KEY = "AIzaSyBOWAqxkAKxBBNkUy2-Fck_PkTqZlL6gIQ"
 DB_NAME = "finance.db"
 
-def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
-
-# ==========================================
-# 2. DATABASE & DATA TOOLS
-# ==========================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, category TEXT, description TEXT, username TEXT)''')
-    conn.commit()
-    conn.close()
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                 amount REAL, category TEXT, description TEXT, 
+                 currency TEXT, username TEXT)''')
+    conn.commit(); conn.close()
 
-def normalize_category(cat):
-    cats = ["Food", "Transport", "Housing", "Entertainment", "Others"]
-    return cat if cat in cats else "Others"
-
-def insert_transaction(amount, category, description, username):
+def insert_transaction(amt, cat, desc, cur, user):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT INTO transactions (amount, category, description, username) VALUES (?, ?, ?, ?)", (amount, category, description, username))
-    conn.commit()
-    conn.close()
+    c.execute("INSERT INTO transactions (amount, category, description, currency, username) VALUES (?, ?, ?, ?, ?)", 
+              (amt, cat, desc, cur, user))
+    conn.commit(); conn.close()
 
 def get_user_transactions(username):
     conn = sqlite3.connect(DB_NAME)
@@ -43,17 +36,21 @@ def get_user_transactions(username):
     return df
 
 # ==========================================
-# 3. AI LOGIC ENGINE
+# 2. ADVANCED AI LOGIC (Currency & Recurring)
 # ==========================================
 def process_user_input(user_text, df):
     client = genai.Client(api_key=MY_API_KEY)
-    history = df.to_string(index=False) if not df.empty else "No history."
-    prompt = f"""You are 'FinSight', a professional AI Finance Assistant.
-    History: {history}. User Input: "{user_text}".
-    Standard Categories: Food, Transport, Housing, Entertainment, Others.
-    Task: Extract data or answer a question. Return STRICTLY valid JSON.
-    If log: {{"intent": "log", "amount": <num>, "category": "<std_cat>", "description": "<text>"}}
-    If chat: {{"intent": "chat", "chat_reply": "<answer>"}}"""
+    # 傳入歷史記錄，讓 AI 偵測循環訂閱
+    history = df.tail(10).to_string() 
+    prompt = f"""
+    Analyze text: "{user_text}". 
+    History: {history}.
+    Task: 
+    1. Extract JSON: {{"intent": "log", "amount": <num>, "category": "<std_cat>", "description": "<text>", "currency": "HKD/USD/etc"}}
+    2. Check for Recurring: Based on history, does this description appear frequently? If so, flag 'is_recurring': True.
+    3. If Chat: {{"intent": "chat", "chat_reply": "<answer>"}}
+    Output ONLY JSON.
+    """
     try:
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
@@ -61,62 +58,48 @@ def process_user_input(user_text, df):
     except: return None
 
 # ==========================================
-# 4. MAIN UI (STREAMLIT)
+# 3. ANALYTICS & PREDICTION
+# ==========================================
+def get_financial_prediction(df):
+    if len(df) < 3: return "Log more data to get predictions!"
+    avg_daily = df['amount'].sum() / 30 # 簡化預測模型
+    return f"Based on your habits, you are spending ${avg_daily:.2f} per day. To save more, try to reduce Entertainment category."
+
+# ==========================================
+# 4. MAIN UI
 # ==========================================
 def main():
     st.set_page_config(page_title="FinSight Pro", layout="wide")
     init_db()
-
-    if "logged_in" not in st.session_state: st.session_state.update({"logged_in": False, "username": None})
-
-    # --- LOGIN PAGE ---
-    if not st.session_state.logged_in:
-        st.title("💰 FinSight Pro - Login")
-        user = st.text_input("Username")
-        pwd = st.text_input("Password", type='password')
-        col1, col2 = st.columns(2)
-        if col1.button("Login"):
-            # (省略登入邏輯，直接進入展示)
-            st.session_state.update({"logged_in": True, "username": user})
-            st.rerun()
     
-    # --- APP PAGE ---
-    else:
-        username = st.session_state.username
-        st.sidebar.title(f"Hi, {username}!")
-        if st.sidebar.button("Logout"): st.session_state.update({"logged_in": False}); st.rerun()
-        
-        budget = st.sidebar.number_input("Monthly Budget ($)", value=1000)
-        df = get_user_transactions(username)
-        
-        tab1, tab2 = st.tabs(["💬 Chat & Log", "📊 Dashboard"])
-        
-        with tab1:
-            st.subheader("Financial Assistant")
-            if "messages" not in st.session_state: st.session_state.messages = []
-            for msg in st.session_state.messages: st.chat_message(msg["role"]).markdown(msg["content"])
-            
-            if prompt := st.chat_input("Log expense or ask question..."):
-                st.chat_message("user").markdown(prompt)
-                res = process_user_input(prompt, df)
-                if res and res.get("intent") == "log":
-                    amt = res['amount']
-                    cat = normalize_category(res.get('category', 'Others'))
-                    if df['amount'].sum() + amt > budget: st.warning("⚠️ Warning: Budget limit exceeded!")
-                    insert_transaction(amt, cat, res['description'], username)
-                    st.rerun()
-                elif res and res.get("chat_reply"):
-                    st.chat_message("assistant").markdown(res['chat_reply'])
+ 
+    username = "DemoUser" 
+    df = get_user_transactions(username)
+    
+    tab1, tab2, tab3 = st.tabs(["💬 Chat", "📊 Analysis", "🔮 AI Insights"])
 
-        with tab2:
-            st.title("Financial Overview")
-            if not df.empty:
-                col1, col2 = st.columns(2)
-                with col1: st.bar_chart(df.groupby('category')['amount'].sum())
-                with col2: st.dataframe(df)
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download CSV", csv, "data.csv", "text/csv")
-            else: st.info("No data.")
+    with tab1:
+        st.header("Log Expenses")
+        if prompt := st.chat_input("Spent 500 HKD on Food..."):
+            res = process_user_input(prompt, df)
+            if res and res.get("intent") == "log":
+                insert_transaction(res['amount'], res['category'], res['description'], res.get('currency', 'HKD'), username)
+                # 偵測循環訂閱
+                if res.get('is_recurring'): st.warning("🔔 Recurring expense detected!")
+                st.rerun()
+
+    with tab2:
+        st.header("Spending Analytics")
+        if not df.empty:
+            st.bar_chart(df.groupby('category')['amount'].sum())
+            st.download_button("Download CSV", df.to_csv().encode('utf-8'), "data.csv")
+
+    with tab3:
+        st.header("AI Future Predictions")
+        st.info(get_financial_prediction(df))
+        if st.button("Generate Strategy"):
+            st.write("AI is analyzing your 30-day spending trend...")
+            # 這裡可以呼叫 AI 針對 df 生成一份 PDF 或報告文字
 
 if __name__ == "__main__":
     main()
